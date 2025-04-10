@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from flask import render_template
 from werkzeug.utils import secure_filename
 import pytesseract
 from PIL import Image
@@ -97,6 +98,10 @@ def extract_text_from_file(file):
             return text
         except Exception as e:
             return str(e)
+        
+@app.route('/', methods=['GET'])
+def home():
+    return render_template("index.html")
 
 @app.route('/extract-number', methods=['POST'])
 def extract_number():
