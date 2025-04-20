@@ -1,13 +1,9 @@
-from flask import Flask, request, jsonify
-from flask import render_template
+from flask import Flask, request, jsonify, render_template
 from werkzeug.utils import secure_filename
 import pytesseract
 from PIL import Image
 import PyPDF2
 import re
-# import io
-# import os
-# import tempfile
 from pdf2image import convert_from_bytes
 
 app = Flask(__name__)
@@ -21,109 +17,84 @@ except EnvironmentError:
     print("Warning: Tesseract OCR not found. Image/PDF OCR will fail.")
 
 def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# def format_to_regex(number_format):
-#     # Convert custom format to regex pattern
-#     # Example: "###-##-####" -> r"\d{3}-\d{2}-\d{4}"
-#     regex_pattern = re.escape(number_format).replace(r'\#', r'\d')
-#     return re.compile(regex_pattern)
-def format_to_regex(number_format):
-    # Convert custom format to regex pattern
-    # Example: "######-###-####" -> r"\d{6}\s*-?\s*\d{3}\s*-?\s*\d{4}"
-    parts = number_format.split('-')
-    regex_parts = []
-    
-    for part in parts:
-        count = len(part)
-        regex_parts.append(r'\d{' + str(count) + r'}\s*')
-    
-    regex_pattern = r'-?\s*'.join(regex_parts)
-    return re.compile(regex_pattern)
+def format_to_regex(number_format: str) -> re.Pattern:
+    """
+    Converts user-defined format with '#' (digit placeholder) into a regex pattern.
+    Supports flexible spacing and separators.
+    """
+    if '#' not in number_format:
+        raise ValueError("Invalid format: must contain at least one '#' character.")
 
-def clean_extracted_text(text):
-    # Remove extra spaces between digits
+    escaped = ''
+    for char in number_format:
+        if char == '#':
+            escaped += r'\d'
+        elif char.isspace():
+            escaped += r'\s*'  # Flexible spacing
+        else:
+            escaped += r'\s*' + re.escape(char) + r'\s*'  # Allow space around separators
+    return re.compile(escaped)
+
+def clean_extracted_text(text: str) -> str:
+    # Normalize spaces and hyphens
     text = re.sub(r'(\d)\s+(\d)', r'\1\2', text)
-    # Normalize hyphens
     text = re.sub(r'\s*-\s*', '-', text)
     return text.strip()
 
 def extract_text_from_file(file):
-    # Check if file is PDF
+    # PDF
     if file.filename.lower().endswith('.pdf'):
         try:
-            # First try to extract text directly
             pdf_reader = PyPDF2.PdfReader(file)
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text()
+            text = "".join(page.extract_text() or '' for page in pdf_reader.pages)
             if text.strip():
                 return text
-            
-            # If no text found, try OCR
+            # If empty, fallback to OCR
             file.seek(0)
             images = convert_from_bytes(file.read())
-            text = ""
-            for image in images:
-                text += pytesseract.image_to_string(image)
-            return text
-            
+            return ''.join(pytesseract.image_to_string(img) for img in images)
         except Exception as e:
             return str(e)
-    
-    # Handle image files
+    # Image
     else:
         try:
-            # Open and preprocess image
             image = Image.open(file)
-            
-            # Convert to grayscale (improves OCR accuracy)
-            image = image.convert('L')
-            
-            # Add sharpening/enhancement if needed
-            # image = image.filter(ImageFilter.SHARPEN)
-            
-            # Extract text with explicit language
-            text = pytesseract.image_to_string(
-                image,
-                lang='eng',  # Specify language
-                config='--psm 6'  # Page segmentation mode
-            )
-
-            # image = Image.open(file)
-            # x=pytesseract.image_to_string(image)
-            print(f"Extracted text from image: {text}")
-            # Perform OCR on the image
-            return text
+            image = image.convert('L')  # Grayscale
+            return pytesseract.image_to_string(image, lang='eng', config='--psm 6')
         except Exception as e:
             return str(e)
-        
+
 @app.route('/', methods=['GET'])
 def home():
     return render_template("index.html")
+
+@app.route('/test', methods=['POST'])
+def test():
+    number_format = request.form['format']
+    return jsonify({
+        "found": True,
+        "format": number_format
+    })
 
 @app.route('/extract-number', methods=['POST'])
 def extract_number():
     if 'file' not in request.files or 'format' not in request.form:
         return jsonify({"error": "Missing file or format parameter"}), 400
-    
+
     file = request.files['file']
     number_format = request.form['format']
-    
+
     if file.filename == '':
         return jsonify({"error": "No selected file"}), 400
-    
     if not allowed_file(file.filename):
         return jsonify({"error": "Invalid file type"}), 400
-    
-    try:
-        # Convert custom format to regex
-        pattern = format_to_regex(number_format)
-        
-        print(f"Regex pattern: {pattern}")
 
-        # Extract text from file
+    try:
+        pattern = format_to_regex(number_format)
+        print(f"Regex pattern: {pattern.pattern}")
+
         text = extract_text_from_file(file)
         if isinstance(text, str):
             text = clean_extracted_text(text)
@@ -131,24 +102,21 @@ def extract_number():
             return jsonify({"error": "Failed to extract text from file"}), 500
 
         print(f"Extracted text: {text}")
-        
-        # Search for the first matching number
-        match = pattern.search(text)
+        matches = pattern.findall(text)
 
-        print(f"Match found: {match}")
-        
-        if match:
+        if matches:
             return jsonify({
                 "found": True,
-                "number": match.group(),
+                "matches": matches,
                 "format": number_format
             })
         else:
             return jsonify({
                 "found": False,
-                "message": "No matching number found"
+                "message": "No matching number found",
+                "format": number_format
             })
-            
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
