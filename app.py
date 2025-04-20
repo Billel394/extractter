@@ -5,10 +5,10 @@ from PIL import Image
 import PyPDF2
 import re
 from pdf2image import convert_from_bytes
+from difflib import SequenceMatcher
 
 app = Flask(__name__)
 
-# Allowed file extensions
 ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg'}
 
 try:
@@ -20,10 +20,6 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def format_to_regex(number_format: str) -> re.Pattern:
-    """
-    Converts user-defined format with '#' (digit placeholder) into a regex pattern.
-    Supports flexible spacing and separators.
-    """
     if '#' not in number_format:
         raise ValueError("Invalid format: must contain at least one '#' character.")
 
@@ -32,39 +28,51 @@ def format_to_regex(number_format: str) -> re.Pattern:
         if char == '#':
             escaped += r'\d'
         elif char.isspace():
-            escaped += r'\s*'  # Flexible spacing
+            escaped += r'\s+'  # Mandatory space
         else:
-            escaped += r'\s*' + re.escape(char) + r'\s*'  # Allow space around separators
+            escaped += r'\s*' + re.escape(char) + r'\s*'
     return re.compile(escaped)
 
 def clean_extracted_text(text: str) -> str:
-    # Normalize spaces and hyphens
-    text = re.sub(r'(\d)\s+(\d)', r'\1\2', text)
+    text = ''.join(c for c in text if c.isprintable())
     text = re.sub(r'\s*-\s*', '-', text)
     return text.strip()
 
 def extract_text_from_file(file):
-    # PDF
     if file.filename.lower().endswith('.pdf'):
         try:
             pdf_reader = PyPDF2.PdfReader(file)
             text = "".join(page.extract_text() or '' for page in pdf_reader.pages)
             if text.strip():
                 return text
-            # If empty, fallback to OCR
             file.seek(0)
             images = convert_from_bytes(file.read())
-            return ''.join(pytesseract.image_to_string(img) for img in images)
+            return ''.join(pytesseract.image_to_string(img, config='--psm 6') for img in images)
         except Exception as e:
             return str(e)
-    # Image
     else:
         try:
             image = Image.open(file)
-            image = image.convert('L')  # Grayscale
-            return pytesseract.image_to_string(image, lang='eng', config='--psm 6')
+            image = image.convert('L')
+            return pytesseract.image_to_string(image, config='--psm 6')
         except Exception as e:
             return str(e)
+
+def is_similar(a, b, threshold=0.88):
+    return SequenceMatcher(None, a, b).ratio() >= threshold
+
+# def filter_similar(matches):
+#     filtered = []
+#     for m in matches:
+#         if not any(is_similar(m, seen) for seen in filtered):
+#             filtered.append(m)
+#     return filtered
+def filter_similar(matches):
+    filtered = []
+    for m in matches:
+        if not any(is_similar(m, seen, threshold=0.92) for seen in filtered):
+            filtered.append(m)
+    return filtered
 
 @app.route('/', methods=['GET'])
 def home():
@@ -72,11 +80,12 @@ def home():
 
 @app.route('/test', methods=['POST'])
 def test():
-    number_format = request.form['format']
-    return jsonify({
-        "found": True,
-        "format": number_format
-    })
+    try:
+        number_format = request.form['format']
+        regex = format_to_regex(number_format).pattern
+        return jsonify({"valid": True, "regex": regex})
+    except Exception as e:
+        return jsonify({"valid": False, "error": str(e)})
 
 @app.route('/extract-number', methods=['POST'])
 def extract_number():
@@ -103,6 +112,7 @@ def extract_number():
 
         print(f"Extracted text: {text}")
         matches = pattern.findall(text)
+        matches = filter_similar(matches)  # 🔍 élimine les doublons trop proches
 
         if matches:
             return jsonify({
